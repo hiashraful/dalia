@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Communication Interface</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap"
+        rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter';
+        }
+
+        body {
+            background: radial-gradient(at bottom left, #2764C0 0%, #3E0D63 40%, #140938 80%),
+                linear-gradient(90deg, transparent 0%, rgba(67, 67, 186, 0.2) 5%, transparent 10%) repeat-x,
+                linear-gradient(to top right, #5B137F 0%, #3E0D63 100%);
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            height: 100vh;
+        }
+
+        .entry-popup {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+
+        .entry-content {
+            text-align: center;
+            color: white;
+        }
+
+        .entry-content h1 {
+            font-size: 3rem;
+            margin-bottom: 2rem;
+            font-weight: 300;
+        }
+
+        .entry-button {
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 1rem 2rem;
+            font-size: 1.2rem;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            font-family: 'Inter', sans-serif;
+            font-weight: 500;
+        }
+
+        .entry-button:hover {
+            transform: scale(1.05);
+        }
+
+        .video-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #mainVideo {
+            width: 100%;
+            height: 100%;
+        }
+
+        .transition-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, rgba(200, 200, 200, 0.6) 0%, rgba(180, 180, 180, 0.4) 50%, rgba(200, 200, 200, 0.6) 100%);
+            opacity: 0;
+            pointer-events: none;
+            z-index: 10;
+            transition: opacity 0.3s ease;
+        }
+
+        .transition-overlay.flash {
+            opacity: 1;
+        }
+
+        .intro-text {
+            position: absolute;
+            top: 5%;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #0e6bea;
+            font-size: 3rem;
+            font-weight: 400;
+            text-align: center;
+            opacity: 0;
+            z-index: 100;
+            transition: all 0.6s ease;
+            pointer-events: none;
+            padding: 20px 40px;
+            border-radius: 10px;
+        }
+
+        .intro-text.fade-in-up {
+            opacity: 1;
+            transform: translateX(-50%) translateY(-30px);
+        }
+
+        .qr-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.9);
+            opacity: 0;
+            z-index: 20;
+            transition: opacity 0.3s ease;
+        }
+
+        .qr-container.show {
+            opacity: 1;
+        }
+
+        .qr-container img {
+            width: 60%;
+            height: 60%;
+            object-fit: contain;
+        }
+
+        .qr-flash {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: white;
+            opacity: 0;
+            z-index: 15;
+            transition: opacity 0.3s ease;
+        }
+
+        .qr-flash.flash {
+            opacity: 1;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="entry-popup" id="entryPopup">
+        <div class="entry-content">
+            <h1>Digital Comm - Farete</h1>
+            <button class="entry-button" onclick="startApp()">Start Experience</button>
+        </div>
+    </div>
+
+    <div class="video-container">
+        <video id="mainVideo" muted></video>
+        <div class="transition-overlay" id="transitionOverlay"></div>
+
+        <div class="intro-text" id="introText">Show 🖐️ to End Intro</div>
+
+        <div class="qr-container" id="qrContainer">
+            <img src="/images/qrcode.png" alt="QR Code" />
+        </div>
+        <div class="qr-flash" id="qrFlash"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let currentSession = null;
+        let introPlayed = false;
+        let isTransitioning = false;
+        let lastGesture = null;
+        let lastGestureTime = 0;
+        let gestureDebounce = 3000;
+        let isPlayingGesture = false;
+        let introTextTimer = null;
+        let qrDisplayTimer = null;
+        let isShowingQR = false;
+        let isPlayingSmallIntro = false;
+        let isPlayingMainIntro = false;
+
+        const videos = {
+            standby: '/videos/IDLE_FINAL.mp4',
+            intro: '/videos/THUMBS_UP_FINAL.mp4',
+            thumbs_up: '/videos/LONG_INTRO_FINAL.mp4',
+            peace: '/videos/PEACE_FINAL.mp4',
+            middle_finger: '/videos/SHOCK_FINAL.mp4',
+            rock_on: '/videos/FLEX_FINAL.mp4',
+            heart: '/videos/HEART_FINAL.mp4',
+            fist_bump: '/videos/FISTBUMP_FINAL.mp4',
+            cuadro: '/videos/SELFIE_FINAL.mp4'
+        };
+
+        const gestureMapping = {
+            'thumbs up': 'thumbs_up',
+            'peace': 'peace',
+            'middle finger': 'middle_finger',
+            'rock on': 'rock_on',
+            'heart': 'heart',
+            'fist bump': 'fist_bump',
+            'cuadro': 'cuadro'
+        };
+
+        const video = document.getElementById('mainVideo');
+        const overlay = document.getElementById('transitionOverlay');
+        const introText = document.getElementById('introText');
+        const qrContainer = document.getElementById('qrContainer');
+        const qrFlash = document.getElementById('qrFlash');
+
+        function startApp() {
+            document.getElementById('entryPopup').style.display = 'none';
+            connectWebSocket();
+            playVideo('standby', true, false);
+        }
+
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:8765');
+
+            ws.onclose = () => {
+                setTimeout(connectWebSocket, 2000);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleDetectionData(data);
+            };
+        }
+
+        function handleDetectionData(data) {
+            if (isTransitioning || isPlayingGesture || isShowingQR) return;
+
+            const personPresent = data.person_count > 0;
+            const personStable = data.person_stable;
+            const gesture = data.gesture;
+            const currentTime = Date.now();
+
+            if (personPresent && personStable && !currentSession) {
+                startSession();
+            } else if (!personPresent && currentSession) {
+                endSession();
+            } else if (currentSession && gesture && gesture !== 'unknown') {
+                const normalizedGesture = normalizeGesture(gesture);
+
+                // Handle waving gesture - show QR code
+                if (normalizedGesture === 'waving') {
+                    if (isPlayingMainIntro) {
+                        // Stop main intro and show QR code
+                        stopMainIntroVideo();
+                        showQRCode();
+                    } else {
+                        // In standby mode, show QR code
+                        showQRCode();
+                    }
+                    return;
+                }
+
+                // Handle thumbs up gesture - trigger main intro
+                if (normalizedGesture === 'thumbs_up') {
+                    // Can start main intro if not already playing intros and in session
+                    const canStartMainIntro = !isPlayingSmallIntro && !isPlayingMainIntro && currentSession;
+                    
+                    if (canStartMainIntro) {
+                        startMainIntro();
+                        return;
+                    } else {
+                        // If main intro is already playing, ignore thumbs up
+                        if (isPlayingMainIntro) {
+                            return;
+                        }
+                    }
+                }
+
+                // Handle other gesture videos (only after intro has been played at least once)
+                // BUT NOT thumbs_up while main intro is playing
+                if (introPlayed && normalizedGesture && videos[normalizedGesture]) {
+                    // Skip thumbs up if main intro is playing
+                    if (normalizedGesture === 'thumbs_up' && isPlayingMainIntro) {
+                        return;
+                    }
+                    
+                    if (normalizedGesture !== lastGesture || (currentTime - lastGestureTime) > gestureDebounce) {
+                        lastGesture = normalizedGesture;
+                        lastGestureTime = currentTime;
+                        playGestureVideo(normalizedGesture);
+                    }
+                }
+            }
+        }
+
+        function normalizeGesture(gesture) {
+            const cleanGesture = gesture.replace(/^[^\w\s]+\s*/, '').toLowerCase().trim();
+            
+            // Handle waving specifically
+            if (cleanGesture === 'waving') {
+                return 'waving';
+            }
+            
+            return gestureMapping[cleanGesture] || null;
+        }
+
+        function startSession() {
+            currentSession = Date.now();
+            // Reset intro played status for new session
+            introPlayed = false;
+            isPlayingSmallIntro = true;
+
+            playVideo('intro', false, true, () => {
+                isPlayingSmallIntro = false;
+                playVideo('standby', true, false);
+            });
+        }
+
+        function startMainIntro() {
+            // Clear any existing intro text timer first
+            if (introTextTimer) {
+                clearTimeout(introTextTimer);
+                introTextTimer = null;
+            }
+            
+            // Hide any existing intro text
+            hideIntroText();
+            
+            isPlayingMainIntro = true;
+
+            playVideo('thumbs_up', false, true, () => {
+                isPlayingMainIntro = false;
+                introPlayed = true;
+                hideIntroText();
+                showQRAfterMainIntro();
+            });
+
+            // Show intro text after 10 seconds every time
+            introTextTimer = setTimeout(() => {
+                if (isPlayingMainIntro && currentSession) {
+                    showIntroText();
+                }
+            }, 10000);
+        }
+
+        function stopMainIntroVideo() {
+            isPlayingMainIntro = false;
+            introPlayed = true;
+            
+            // Clear intro text timer and hide text
+            if (introTextTimer) {
+                clearTimeout(introTextTimer);
+                introTextTimer = null;
+            }
+            hideIntroText();
+
+            video.pause();
+            video.onended = null;
+        }
+
+        function showQRAfterMainIntro() {
+            showQRCodeSimple();
+
+            qrDisplayTimer = setTimeout(() => {
+                hideQRCode();
+                playVideo('standby', true, false);
+            }, 10000);
+        }
+
+        function endSession() {
+            currentSession = null;
+            introPlayed = false;
+            isPlayingSmallIntro = false;
+            isPlayingMainIntro = false;
+            lastGesture = null;
+            lastGestureTime = 0;
+            isPlayingGesture = false;
+
+            if (introTextTimer) {
+                clearTimeout(introTextTimer);
+                introTextTimer = null;
+            }
+            if (qrDisplayTimer) {
+                clearTimeout(qrDisplayTimer);
+                qrDisplayTimer = null;
+            }
+
+            hideIntroText();
+            hideQRCode();
+            playVideo('standby', true, false);
+        }
+
+        function showIntroText() {
+            introText.classList.add('fade-in-up');
+        }
+
+        function hideIntroText() {
+            introText.classList.remove('fade-in-up');
+            if (introTextTimer) {
+                clearTimeout(introTextTimer);
+                introTextTimer = null;
+            }
+        }
+
+        function showQRCode() {
+            if (isShowingQR) return;
+
+            isShowingQR = true;
+            
+            // Clear any existing QR display timer
+            if (qrDisplayTimer) {
+                clearTimeout(qrDisplayTimer);
+                qrDisplayTimer = null;
+            }
+
+            qrFlash.classList.add('flash');
+
+            setTimeout(() => {
+                qrContainer.classList.add('show');
+                qrFlash.classList.remove('flash');
+
+                qrDisplayTimer = setTimeout(() => {
+                    hideQRCode();
+                    playVideo('standby', true, false);
+                }, 10000);
+            }, 300);
+        }
+
+        function showQRCodeSimple() {
+            if (isShowingQR) return;
+
+            isShowingQR = true;
+            qrContainer.classList.add('show');
+        }
+
+        function hideQRCode() {
+            qrContainer.classList.remove('show');
+            isShowingQR = false;
+
+            if (qrDisplayTimer) {
+                clearTimeout(qrDisplayTimer);
+                qrDisplayTimer = null;
+            }
+        }
+
+        function playGestureVideo(gesture) {
+            // Don't play gesture videos while main intro is playing
+            if (isPlayingMainIntro) {
+                return;
+            }
+            
+            isPlayingGesture = true;
+            
+            // Clear any intro text timer and hide text
+            if (introTextTimer) {
+                clearTimeout(introTextTimer);
+                introTextTimer = null;
+            }
+            hideIntroText();
+
+            playVideo(gesture, false, true, () => {
+                setTimeout(() => {
+                    isPlayingGesture = false;
+                    playVideo('standby', true, false);
+                }, 1000);
+            });
+        }
+
+        function playVideo(videoKey, loop = false, withSound = true, onEnded = null) {
+            if (isTransitioning) return;
+
+            isTransitioning = true;
+            overlay.classList.add('flash');
+
+            setTimeout(() => {
+                video.src = videos[videoKey];
+                video.loop = loop;
+                video.muted = !withSound;
+                video.volume = withSound ? 1.0 : 0;
+
+                if (onEnded) {
+                    video.onended = () => {
+                        video.onended = null;
+                        onEnded();
+                    };
+                } else {
+                    video.onended = null;
+                }
+
+                video.play().then(() => {
+                    if (withSound) {
+                        video.muted = false;
+                    }
+                }).catch((error) => {
+                    // Silent error handling
+                });
+
+                overlay.classList.remove('flash');
+                isTransitioning = false;
+            }, 300);
+        }
+
+        video.addEventListener('loadstart', () => {
+            video.currentTime = 0;
+        });
+    </script>
+</body>
+
+</html>
