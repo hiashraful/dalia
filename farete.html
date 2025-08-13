@@ -102,15 +102,13 @@
             left: 50%;
             transform: translateX(-50%);
             color: #0e6bea;
-            font-size: 3rem;
+            font-size: 2rem;
             font-weight: 400;
             text-align: center;
             opacity: 0;
             z-index: 100;
             transition: all 0.6s ease;
             pointer-events: none;
-            padding: 20px 40px;
-            border-radius: 10px;
         }
 
         .intro-text.fade-in-up {
@@ -188,18 +186,17 @@
         let isTransitioning = false;
         let lastGesture = null;
         let lastGestureTime = 0;
-        let gestureDebounce = 3000;
-        let isPlayingGesture = false;
+        let gestureDebounce = 1000;
         let introTextTimer = null;
         let qrDisplayTimer = null;
-        let isShowingQR = false;
-        let isPlayingSmallIntro = false;
-        let isPlayingMainIntro = false;
+
+        // State tracking
+        let currentState = 'standby';
 
         const videos = {
             standby: '/videos/IDLE_FINAL.mp4',
-            intro: '/videos/THUMBS_UP_FINAL.mp4',
-            thumbs_up: '/videos/LONG_INTRO_FINAL.mp4',
+            small_intro: '/videos/THUMBS_UP_FINAL.mp4',
+            main_intro: '/videos/LONG_INTRO_FINAL.mp4',
             peace: '/videos/PEACE_FINAL.mp4',
             middle_finger: '/videos/SHOCK_FINAL.mp4',
             rock_on: '/videos/FLEX_FINAL.mp4',
@@ -215,7 +212,10 @@
             'rock on': 'rock_on',
             'heart': 'heart',
             'fist bump': 'fist_bump',
-            'cuadro': 'cuadro'
+            'cuadro': 'cuadro',
+            'k heart': 'heart',
+            'stoppie': 'stoppie',
+            'waving': 'waving'
         };
 
         const video = document.getElementById('mainVideo');
@@ -228,6 +228,7 @@
             document.getElementById('entryPopup').style.display = 'none';
             connectWebSocket();
             playVideo('standby', true, false);
+            currentState = 'standby';
         }
 
         function connectWebSocket() {
@@ -244,136 +245,168 @@
         }
 
         function handleDetectionData(data) {
-            if (isTransitioning || isPlayingGesture || isShowingQR) return;
+            if (isTransitioning) return;
 
             const personPresent = data.person_count > 0;
             const personStable = data.person_stable;
             const gesture = data.gesture;
             const currentTime = Date.now();
 
+            // Handle person detection/loss
             if (personPresent && personStable && !currentSession) {
                 startSession();
+                return;
             } else if (!personPresent && currentSession) {
                 endSession();
-            } else if (currentSession && gesture && gesture !== 'unknown') {
-                const normalizedGesture = normalizeGesture(gesture);
+                return;
+            }
 
-                // Handle waving gesture - show QR code
-                if (normalizedGesture === 'waving') {
-                    if (isPlayingMainIntro) {
-                        // Stop main intro and show QR code
-                        stopMainIntroVideo();
-                        showQRCode();
-                    } else {
-                        // In standby mode, show QR code
-                        showQRCode();
-                    }
-                    return;
-                }
+            if (!currentSession || !gesture || gesture === 'unknown') return;
 
-                // Handle thumbs up gesture - trigger main intro
-                if (normalizedGesture === 'thumbs_up') {
-                    // Can start main intro if not already playing intros and in session
-                    const canStartMainIntro = !isPlayingSmallIntro && !isPlayingMainIntro && currentSession;
-                    
-                    if (canStartMainIntro) {
-                        startMainIntro();
-                        return;
-                    } else {
-                        // If main intro is already playing, ignore thumbs up
-                        if (isPlayingMainIntro) {
-                            return;
-                        }
-                    }
-                }
+            const normalizedGesture = normalizeGesture(gesture);
+            if (!normalizedGesture) return;
 
-                // Handle other gesture videos (only after intro has been played at least once)
-                // BUT NOT thumbs_up while main intro is playing
-                if (introPlayed && normalizedGesture && videos[normalizedGesture]) {
-                    // Skip thumbs up if main intro is playing
-                    if (normalizedGesture === 'thumbs_up' && isPlayingMainIntro) {
-                        return;
-                    }
-                    
-                    if (normalizedGesture !== lastGesture || (currentTime - lastGestureTime) > gestureDebounce) {
-                        lastGesture = normalizedGesture;
-                        lastGestureTime = currentTime;
-                        playGestureVideo(normalizedGesture);
-                    }
+            // Handle stoppie - always forces standby except when already in standby
+            if (normalizedGesture === 'stoppie') {
+                if (currentState !== 'standby') {
+                    forceStandbyMode();
                 }
+                return;
+            }
+
+            // Handle gestures based on current state
+            switch (currentState) {
+                case 'standby':
+                    handleStandbyGestures(normalizedGesture, currentTime);
+                    break;
+                case 'small_intro':
+                    handleSmallIntroGestures(normalizedGesture);
+                    break;
+                case 'main_intro':
+                    handleMainIntroGestures(normalizedGesture);
+                    break;
+                case 'gesture_video':
+                    // Only stoppie can interrupt (handled above)
+                    break;
+                case 'showing_qr':
+                    // Only stoppie can interrupt (handled above)
+                    break;
+            }
+        }
+
+        function handleStandbyGestures(gesture, currentTime) {
+            // Accept all gestures except stoppie
+            if (gesture === 'waving') {
+                showQRCode();
+                return;
+            }
+
+            if (gesture === 'thumbs_up') {
+                startMainIntro();
+                return;
+            }
+
+            // Handle gesture videos - peace, middle_finger, rock_on, heart, fist_bump, cuadro
+            const gestureVideos = ['peace', 'middle_finger', 'rock_on', 'heart', 'fist_bump', 'cuadro'];
+            if (gestureVideos.includes(gesture) && (currentTime - lastGestureTime) > gestureDebounce) {
+                lastGesture = gesture;
+                lastGestureTime = currentTime;
+                playGestureVideo(gesture);
+            }
+        }
+
+        function handleSmallIntroGestures(gesture) {
+            // Only accept thumbs up and wave
+            if (gesture === 'thumbs_up') {
+                stopCurrentVideo();
+                startMainIntro();
+            } else if (gesture === 'waving') {
+                stopCurrentVideo();
+                showQRCode();
+            }
+        }
+
+        function handleMainIntroGestures(gesture) {
+            // Only accept stoppie and wave
+            if (gesture === 'waving') {
+                stopMainIntroVideo();
+                showQRCode();
             }
         }
 
         function normalizeGesture(gesture) {
             const cleanGesture = gesture.replace(/^[^\w\s]+\s*/, '').toLowerCase().trim();
-            
-            // Handle waving specifically
-            if (cleanGesture === 'waving') {
-                return 'waving';
-            }
-            
             return gestureMapping[cleanGesture] || null;
+        }
+
+        function forceStandbyMode() {
+            // Stop all current activities and force standby
+            stopCurrentVideo();
+            hideIntroText();
+            hideQRCode();
+
+            // Reset state
+            currentState = 'standby';
+            lastGesture = null;
+            lastGestureTime = 0;
+
+            playVideo('standby', true, false);
         }
 
         function startSession() {
             currentSession = Date.now();
-            // Reset intro played status for new session
             introPlayed = false;
-            isPlayingSmallIntro = true;
 
-            playVideo('intro', false, true, () => {
-                isPlayingSmallIntro = false;
+            // Automatically play small intro when person detected
+            currentState = 'small_intro';
+            playVideo('small_intro', false, true, () => {
+                // After small intro ends, go to standby
+                currentState = 'standby';
                 playVideo('standby', true, false);
             });
         }
 
         function startMainIntro() {
-            // Clear any existing intro text timer first
-            if (introTextTimer) {
-                clearTimeout(introTextTimer);
-                introTextTimer = null;
-            }
-            
-            // Hide any existing intro text
+            clearTimers();
             hideIntroText();
-            
-            isPlayingMainIntro = true;
+            hideQRCode();
 
-            playVideo('thumbs_up', false, true, () => {
-                isPlayingMainIntro = false;
+            currentState = 'main_intro';
+
+            playVideo('main_intro', false, true, () => {
+                currentState = 'standby';
                 introPlayed = true;
                 hideIntroText();
                 showQRAfterMainIntro();
             });
 
-            // Show intro text after 10 seconds every time
+            // Show intro text after 10 seconds
             introTextTimer = setTimeout(() => {
-                if (isPlayingMainIntro && currentSession) {
+                if (currentState === 'main_intro' && currentSession) {
                     showIntroText();
                 }
             }, 10000);
         }
 
-        function stopMainIntroVideo() {
-            isPlayingMainIntro = false;
-            introPlayed = true;
-            
-            // Clear intro text timer and hide text
-            if (introTextTimer) {
-                clearTimeout(introTextTimer);
-                introTextTimer = null;
-            }
-            hideIntroText();
-
+        function stopCurrentVideo() {
             video.pause();
             video.onended = null;
         }
 
+        function stopMainIntroVideo() {
+            introPlayed = true;
+            clearTimers();
+            hideIntroText();
+            stopCurrentVideo();
+        }
+
         function showQRAfterMainIntro() {
+            currentState = 'showing_qr';
             showQRCodeSimple();
 
             qrDisplayTimer = setTimeout(() => {
                 hideQRCode();
+                currentState = 'standby';
                 playVideo('standby', true, false);
             }, 10000);
         }
@@ -381,12 +414,17 @@
         function endSession() {
             currentSession = null;
             introPlayed = false;
-            isPlayingSmallIntro = false;
-            isPlayingMainIntro = false;
+            currentState = 'standby';
             lastGesture = null;
             lastGestureTime = 0;
-            isPlayingGesture = false;
 
+            clearTimers();
+            hideIntroText();
+            hideQRCode();
+            playVideo('standby', true, false);
+        }
+
+        function clearTimers() {
             if (introTextTimer) {
                 clearTimeout(introTextTimer);
                 introTextTimer = null;
@@ -395,10 +433,6 @@
                 clearTimeout(qrDisplayTimer);
                 qrDisplayTimer = null;
             }
-
-            hideIntroText();
-            hideQRCode();
-            playVideo('standby', true, false);
         }
 
         function showIntroText() {
@@ -407,22 +441,13 @@
 
         function hideIntroText() {
             introText.classList.remove('fade-in-up');
-            if (introTextTimer) {
-                clearTimeout(introTextTimer);
-                introTextTimer = null;
-            }
         }
 
         function showQRCode() {
-            if (isShowingQR) return;
+            if (currentState === 'showing_qr') return;
 
-            isShowingQR = true;
-            
-            // Clear any existing QR display timer
-            if (qrDisplayTimer) {
-                clearTimeout(qrDisplayTimer);
-                qrDisplayTimer = null;
-            }
+            currentState = 'showing_qr';
+            clearTimers();
 
             qrFlash.classList.add('flash');
 
@@ -432,46 +457,29 @@
 
                 qrDisplayTimer = setTimeout(() => {
                     hideQRCode();
+                    currentState = 'standby';
                     playVideo('standby', true, false);
                 }, 10000);
             }, 300);
         }
 
         function showQRCodeSimple() {
-            if (isShowingQR) return;
-
-            isShowingQR = true;
             qrContainer.classList.add('show');
         }
 
         function hideQRCode() {
             qrContainer.classList.remove('show');
-            isShowingQR = false;
-
-            if (qrDisplayTimer) {
-                clearTimeout(qrDisplayTimer);
-                qrDisplayTimer = null;
-            }
+            clearTimers();
         }
 
         function playGestureVideo(gesture) {
-            // Don't play gesture videos while main intro is playing
-            if (isPlayingMainIntro) {
-                return;
-            }
-            
-            isPlayingGesture = true;
-            
-            // Clear any intro text timer and hide text
-            if (introTextTimer) {
-                clearTimeout(introTextTimer);
-                introTextTimer = null;
-            }
+            currentState = 'gesture_video';
+            clearTimers();
             hideIntroText();
 
             playVideo(gesture, false, true, () => {
                 setTimeout(() => {
-                    isPlayingGesture = false;
+                    currentState = 'standby';
                     playVideo('standby', true, false);
                 }, 1000);
             });

@@ -35,7 +35,7 @@ MAX_DISTANCE = 2.0
 CENTER_THRESHOLD = 0.3
 COOLDOWN_TIME = 10
 PERSON_STABLE_THRESHOLD = 3.0
-GESTURE_STABLE_THRESHOLD = 1.2
+GESTURE_STABLE_THRESHOLD = 1.2  # Updated to 1.5 seconds for all gestures
 
 mp_hands = mp.solutions.hands
 mp_pose = mp.solutions.pose
@@ -46,6 +46,7 @@ def load_keypoint_classifier():
         keypoint_classifier = KeyPointClassifier()
         with open('model/keypoint_classifier/keypoint_classifier_label.csv', encoding='utf-8-sig') as f:
             keypoint_classifier_labels = [row[0] for row in [line.strip().split(',') for line in f]]
+        logger.info(f"Loaded {len(keypoint_classifier_labels)} gesture classes: {keypoint_classifier_labels}")
         return keypoint_classifier, keypoint_classifier_labels
     except Exception as e:
         logger.error(f"Error loading keypoint classifier: {e}")
@@ -79,7 +80,7 @@ def pre_process_landmark(landmark_list):
     temp_landmark_list = list(np.array(temp_landmark_list).flatten())
     max_value = max(list(map(abs, temp_landmark_list)))
     def normalize_(n):
-        return n / max_value
+        return n / max_value if max_value != 0 else 0
     temp_landmark_list = list(map(normalize_, temp_landmark_list))
     return temp_landmark_list
 
@@ -281,6 +282,7 @@ def main():
     show_video = True
     
     logger.info("Starting main detection loop...")
+    logger.info(f"Gesture stability threshold: {GESTURE_STABLE_THRESHOLD} seconds")
     
     try:
         while True:
@@ -333,13 +335,13 @@ def main():
                     current_data["person_detected_time"] = 0
                     current_data["person_stable"] = False
             
+            # Gesture Detection with 1.5 second stability requirement
             if hand_result.multi_hand_landmarks:
                 for hand_landmarks in hand_result.multi_hand_landmarks:
                     landmark_list = calc_landmark_list(img, hand_landmarks)
                     pre_processed_landmark_list = pre_process_landmark(landmark_list)
                     hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
                     
-                    # SIMPLIFIED GESTURE DETECTION - NO MOTION DETECTION FOR WAVING
                     current_detected_gesture = "unknown"
                     if hand_sign_id < len(keypoint_classifier_labels):
                         current_detected_gesture = keypoint_classifier_labels[hand_sign_id]
@@ -350,9 +352,12 @@ def main():
                             current_data["last_detected_gesture"] = current_detected_gesture
                             current_data["gesture_detected_time"] = current_time
                             current_data["gesture_stable"] = False
+                            logger.debug(f"New gesture detected: {current_detected_gesture}, starting stability timer")
                         else:
                             time_stable = current_time - current_data["gesture_detected_time"]
                             if time_stable >= GESTURE_STABLE_THRESHOLD:
+                                if not current_data["gesture_stable"]:
+                                    logger.info(f"Gesture '{current_detected_gesture}' stable for {GESTURE_STABLE_THRESHOLD}s - sending to websocket")
                                 current_data["gesture_stable"] = True
                             else:
                                 current_data["gesture_stable"] = False
@@ -365,7 +370,9 @@ def main():
                         current_data["last_detected_gesture"] = "unknown"
                         current_data["gesture_detected_time"] = current_time
                         current_data["gesture_stable"] = False
+                        logger.debug("No hand detected, resetting gesture to unknown")
             
+            # Only send stable gestures to websocket
             stable_gesture = "unknown"
             with data_lock:
                 if current_data["gesture_stable"]:
@@ -374,7 +381,7 @@ def main():
             with data_lock:
                 current_data.update({
                     "person_count": person_count,
-                    "gesture": stable_gesture,
+                    "gesture": stable_gesture,  # Only stable gestures are sent
                     "timestamp": time.time(),
                     "status": "running",
                     "detection_triggered": detection_triggered
@@ -386,13 +393,25 @@ def main():
                 with data_lock:
                     real_time_gesture = current_data["last_detected_gesture"]
                     is_stable = current_data["gesture_stable"]
-                    stability_text = "STABLE" if is_stable else "DETECTING..."
-                    stability_color = (0, 255, 0) if is_stable else (0, 255, 255)
+                    time_detecting = time.time() - current_data["gesture_detected_time"]
+                    
+                    if real_time_gesture != "unknown":
+                        stability_text = f"STABLE ({time_detecting:.1f}s)" if is_stable else f"DETECTING... ({time_detecting:.1f}s/{GESTURE_STABLE_THRESHOLD}s)"
+                        stability_color = (0, 255, 0) if is_stable else (0, 255, 255)
+                    else:
+                        stability_text = "NO HAND"
+                        stability_color = (128, 128, 128)
                 
                 cv2.putText(display_img, f"Gesture: {real_time_gesture}", (10, 50), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
                 cv2.putText(display_img, stability_text, (10, 100), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, stability_color, 2)
+                
+                # Show what gets sent to websocket
+                with data_lock:
+                    websocket_gesture = current_data["gesture"]
+                cv2.putText(display_img, f"WebSocket: {websocket_gesture}", (10, 140), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
                 
                 if hand_result.multi_hand_landmarks:
                     for hand_landmarks in hand_result.multi_hand_landmarks:

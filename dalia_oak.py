@@ -1,4 +1,3 @@
-import depthai as dai
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -11,6 +10,9 @@ import logging
 from collections import Counter, deque
 from model.keypoint_classifier.keypoint_classifier import KeyPointClassifier
 from model.point_history_classifier.point_history_classifier import PointHistoryClassifier
+
+# DepthAI for OAK-D S2 camera
+import depthai as dai
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,67 +31,37 @@ current_data = {
     "gesture_detected_time": 0,
     "gesture_stable": False,
     "last_detected_gesture": "unknown",
-    "depth_enabled": True,
-    "distance_to_person": 0.0
+    "confidence": 0.0
 }
 
-MIN_DISTANCE = 0.5
-MAX_DISTANCE = 2.0
-CENTER_THRESHOLD = 0.3
-COOLDOWN_TIME = 10
-PERSON_STABLE_THRESHOLD = 3.0
-GESTURE_STABLE_THRESHOLD = 1.2
+# REMOVED DISTANCE CONDITIONS FOR TESTING
+PERSON_STABLE_THRESHOLD = 2.0  # Reduced from 3.0
+GESTURE_STABLE_THRESHOLD = 1.5  # 1.5 seconds for all gestures - STABILITY REQUIRED
 
 mp_hands = mp.solutions.hands
 mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 
-def create_oak_d_s2_pipeline():
-    """Create DepthAI pipeline for Oak D S2 camera"""
+def create_oak_pipeline():
+    """Create DepthAI pipeline for OAK-D S2 camera"""
     # Create pipeline
     pipeline = dai.Pipeline()
-    
-    # Define sources and outputs
-    cam_rgb = pipeline.create(dai.node.ColorCamera)
-    depth = pipeline.create(dai.node.MonoCamera)
-    depth2 = pipeline.create(dai.node.MonoCamera)
-    depth_output = pipeline.create(dai.node.StereoDepth)
-    
-    # RGB camera properties
-    cam_rgb.setPreviewSize(640, 480)
-    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam_rgb.setInterleaved(False)
-    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
-    cam_rgb.setFps(30)
-    
-    # Mono cameras for depth
-    depth.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    depth.setBoardSocket(dai.CameraBoardSocket.LEFT)
-    depth2.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    depth2.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-    
-    # Create depth output
-    depth_output.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
-    depth_output.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_7x7)
-    depth_output.setLeftRightCheck(True)
-    depth_output.setSubpixel(False)
-    depth_output.setExtendedDisparity(False)
-    
-    # Link cameras to depth
-    depth.out.link(depth_output.left)
-    depth2.out.link(depth_output.right)
-    
-    # Create outputs
-    rgb_out = pipeline.create(dai.node.XLinkOut)
-    depth_out = pipeline.create(dai.node.XLinkOut)
-    
-    rgb_out.setStreamName("rgb")
-    depth_out.setStreamName("depth")
-    
-    # Link to outputs
-    cam_rgb.preview.link(rgb_out.input)
-    depth_output.depth.link(depth_out.input)
-    
+
+    # Define source and output
+    camRgb = pipeline.create(dai.node.ColorCamera)
+    xoutRgb = pipeline.create(dai.node.XLinkOut)
+
+    xoutRgb.setStreamName("rgb")
+
+    # Properties
+    camRgb.setPreviewSize(640, 480)  # Set preview size
+    camRgb.setInterleaved(False)
+    camRgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
+    camRgb.setFps(30)  # Set FPS
+
+    # Link nodes
+    camRgb.preview.link(xoutRgb.input)
+
     return pipeline
 
 def load_keypoint_classifier():
@@ -97,6 +69,7 @@ def load_keypoint_classifier():
         keypoint_classifier = KeyPointClassifier()
         with open('model/keypoint_classifier/keypoint_classifier_label.csv', encoding='utf-8-sig') as f:
             keypoint_classifier_labels = [row[0] for row in [line.strip().split(',') for line in f]]
+        logger.info(f"Loaded {len(keypoint_classifier_labels)} gesture classes: {keypoint_classifier_labels}")
         return keypoint_classifier, keypoint_classifier_labels
     except Exception as e:
         logger.error(f"Error loading keypoint classifier: {e}")
@@ -122,108 +95,76 @@ def calc_landmark_list(image, landmarks):
     return landmark_point
 
 def pre_process_landmark(landmark_list):
-    temp_landmark_list = copy.deepcopy(landmark_list)
-    base_x, base_y = 0, 0
+    temp_landmark_list = landmark_list.copy()
+    base_x, base_y = temp_landmark_list[0][0], temp_landmark_list[0][1]
     for index, landmark_point in enumerate(temp_landmark_list):
-        if index == 0:
-            base_x, base_y = landmark_point[0], landmark_point[1]
         temp_landmark_list[index][0] = temp_landmark_list[index][0] - base_x
         temp_landmark_list[index][1] = temp_landmark_list[index][1] - base_y
-    temp_landmark_list = list(itertools.chain.from_iterable(temp_landmark_list))
+    temp_landmark_list = list(np.array(temp_landmark_list).flatten())
     max_value = max(list(map(abs, temp_landmark_list)))
     def normalize_(n):
-        return n / max_value
+        return n / max_value if max_value != 0 else 0
     temp_landmark_list = list(map(normalize_, temp_landmark_list))
     return temp_landmark_list
 
-def pre_process_point_history(image, point_history):
-    image_width, image_height = image.shape[1], image.shape[0]
-    temp_point_history = copy.deepcopy(point_history)
-    base_x, base_y = 0, 0
-    for index, point in enumerate(temp_point_history):
-        if index == 0:
-            base_x, base_y = point[0], point[1]
-        temp_point_history[index][0] = (temp_point_history[index][0] - base_x) / image_width
-        temp_point_history[index][1] = (temp_point_history[index][1] - base_y) / image_height
-    temp_point_history = list(itertools.chain.from_iterable(temp_point_history))
-    return temp_point_history
-
 def detect_person(pose_landmarks):
-    """Enhanced person detection using pose landmarks"""
-    if not pose_landmarks:
-        return False
-    
-    # Check if key body parts are visible
-    key_points = [
-        pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE],
-        pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_SHOULDER],
-        pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_SHOULDER],
-        pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_ELBOW],
-        pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_ELBOW]
+    """Simplified person detection - just check if we have pose landmarks"""
+    required_landmarks = [
+        mp_pose.PoseLandmark.NOSE,
+        mp_pose.PoseLandmark.LEFT_SHOULDER,
+        mp_pose.PoseLandmark.RIGHT_SHOULDER
     ]
     
-    visible_count = sum(1 for point in key_points if point.visibility > 0.5)
-    return visible_count >= 3
+    visible_count = 0
+    for landmark_id in required_landmarks:
+        landmark = pose_landmarks.landmark[landmark_id]
+        if landmark.visibility > 0.3:  # Lowered threshold
+            visible_count += 1
+    
+    return visible_count >= 2  # Lowered requirement
 
-def is_person_centered_and_in_range(pose_landmarks, depth_frame, frame_width, frame_height):
-    """Check if person is centered and within optimal distance using depth data"""
-    if not pose_landmarks:
-        return False, 0.0
-    
-    # Get nose position for center detection
-    nose = pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE]
-    nose_x = int(nose.x * frame_width)
-    nose_y = int(nose.y * frame_height)
-    
-    # Check if person is centered
-    center_x = frame_width // 2
-    center_y = frame_height // 2
-    
-    distance_from_center_x = abs(nose_x - center_x) / frame_width
-    distance_from_center_y = abs(nose_y - center_y) / frame_height
-    
-    is_centered = (distance_from_center_x < CENTER_THRESHOLD and 
-                   distance_from_center_y < CENTER_THRESHOLD)
-    
-    # Get depth at nose position
-    distance = 0.0
-    if depth_frame is not None and 0 <= nose_x < depth_frame.shape[1] and 0 <= nose_y < depth_frame.shape[0]:
-        # Sample area around nose for more stable reading
-        sample_size = 20
-        x1 = max(0, nose_x - sample_size)
-        x2 = min(depth_frame.shape[1], nose_x + sample_size)
-        y1 = max(0, nose_y - sample_size)
-        y2 = min(depth_frame.shape[0], nose_y + sample_size)
-        
-        depth_region = depth_frame[y1:y2, x1:x2]
-        valid_depths = depth_region[depth_region > 0]
-        
-        if len(valid_depths) > 0:
-            distance = np.median(valid_depths) / 1000.0  # Convert mm to meters
-    
-    is_in_range = MIN_DISTANCE <= distance <= MAX_DISTANCE
-    
-    return is_centered and is_in_range, distance
-
-async def websocket_handler(websocket, path):
-    """Handle WebSocket connections"""
+async def websocket_handler(websocket, path=""):
+    client_ip = "unknown"
     try:
-        connected_clients.add(websocket)
         client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
-        logger.info(f"Client {client_ip} connected. Total clients: {len(connected_clients)}")
+        logger.info(f"Client connected from {client_ip}")
+        connected_clients.add(websocket)
         
-        await websocket.wait_closed()
+        welcome_msg = {
+            "type": "connection",
+            "message": "Connected to OAK-D S2 person and gesture detection",
+            "timestamp": time.time()
+        }
+        await websocket.send(json.dumps(welcome_msg))
+        
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+                if data.get("type") == "ping":
+                    await websocket.send(json.dumps({
+                        "type": "pong", 
+                        "timestamp": time.time()
+                    }))
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON from {client_ip}")
+                continue
+            except Exception as e:
+                logger.error(f"Error processing message from {client_ip}: {e}")
+                break
+        
     except websockets.exceptions.ConnectionClosed:
-        pass
+        logger.info(f"Client {client_ip} disconnected normally")
+    except websockets.exceptions.InvalidMessage as e:
+        logger.info(f"Invalid WebSocket handshake from {client_ip}: {e}")
+    except websockets.exceptions.ConnectionClosedError:
+        logger.info(f"Connection closed unexpectedly for {client_ip}")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"Unexpected error for client {client_ip}: {e}")
     finally:
         connected_clients.discard(websocket)
-        client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
         logger.info(f"Client {client_ip} cleaned up")
 
 async def broadcast_data():
-    """Broadcast detection data to all connected clients"""
     while True:
         if connected_clients:
             with data_lock:
@@ -244,7 +185,6 @@ async def broadcast_data():
         await asyncio.sleep(1/30)
 
 def start_websocket_server():
-    """Start WebSocket server in a separate thread"""
     async def server():
         try:
             server = await websockets.serve(
@@ -258,7 +198,7 @@ def start_websocket_server():
                 process_request=None
             )
             
-            logger.info("WebSocket server started on localhost:8765")
+            logger.info("WebSocket server started on localhost:8765 (OAK-D S2 mode)")
             broadcast_task = asyncio.create_task(broadcast_data())
             
             try:
@@ -295,266 +235,249 @@ def main():
         logger.error("Failed to load keypoint classifier")
         return
     
-    # Create Oak D S2 pipeline and device
-    logger.info("Initializing Oak D S2 camera...")
-    pipeline = create_oak_d_s2_pipeline()
+    # Create DepthAI pipeline and connect to OAK-D S2
+    logger.info("Initializing OAK-D S2 camera...")
+    pipeline = create_oak_pipeline()
     
-    try:
-        device = dai.Device(pipeline)
-        logger.info("Oak D S2 camera connected successfully")
-    except Exception as e:
-        logger.error(f"Failed to connect to Oak D S2 camera: {e}")
-        logger.info("Make sure the Oak D S2 is connected via USB")
+    # Check for available devices
+    found_devices = dai.Device.getAllAvailableDevices()
+    if len(found_devices) == 0:
+        logger.error("No OAK-D devices found! Make sure your OAK-D S2 is connected.")
         return
     
-    # Output queues
-    rgb_queue = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
-    depth_queue = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
+    logger.info(f"Found {len(found_devices)} OAK-D device(s)")
+    for device in found_devices:
+        logger.info(f"Device: {device.name} - {device.mxid}")
     
-    # Initialize MediaPipe
-    hands = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.85,
-        min_tracking_confidence=0.5,
-        model_complexity=0
-    )
-    
-    pose = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        smooth_landmarks=True,
-        enable_segmentation=False,
-        smooth_segmentation=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    
-    history_length = 16
-    point_history = deque(maxlen=history_length)
-    finger_gesture_history = deque(maxlen=history_length)
-    
-    show_video = True
-    
-    logger.info("Starting main detection loop...")
-    
+    # Connect to device and start pipeline
     try:
-        while True:
-            # Get RGB and depth frames
-            rgb_frame = rgb_queue.get().getCvFrame()
-            depth_frame = depth_queue.get().getFrame()
+        with dai.Device(pipeline) as device:
+            logger.info("Connected to OAK-D S2 successfully!")
+            logger.info(f"Gesture stability threshold: {GESTURE_STABLE_THRESHOLD} seconds")
             
-            if rgb_frame is None:
-                continue
+            # Output queue will be used to get the rgb frames from the output defined above
+            q = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
             
-            # Process RGB frame
-            img = np.copy(rgb_frame)
-            img = cv2.flip(img, 1)  # Mirror for better UX
-            debug_img = img.copy()
+            # Initialize MediaPipe
+            hands = mp_hands.Hands(
+                static_image_mode=False,
+                max_num_hands=2,
+                min_detection_confidence=0.7,  # Lowered for testing
+                min_tracking_confidence=0.5,
+                model_complexity=0
+            )
             
-            # Convert depth to proper format for processing
-            if depth_frame is not None:
-                depth_frame = cv2.flip(depth_frame, 1)  # Mirror depth too
+            pose = mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                smooth_landmarks=True,
+                enable_segmentation=False,
+                smooth_segmentation=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
             
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img_rgb.flags.writeable = False
+            history_length = 16
+            point_history = deque(maxlen=history_length)
+            finger_gesture_history = deque(maxlen=history_length)
             
-            frame_height, frame_width = img.shape[:2]
+            show_video = True
             
-            # MediaPipe processing
-            hand_result = hands.process(img_rgb)
-            pose_result = pose.process(img_rgb)
+            logger.info("Starting main detection loop with OAK-D S2...")
             
-            img_rgb.flags.writeable = True
-            
-            person_count = 0
-            detection_triggered = False
-            distance_to_person = 0.0
-            
-            # STRICT distance-based person detection
-            if pose_result.pose_landmarks:
-                if detect_person(pose_result.pose_landmarks):
-                    # Check distance FIRST - only detect if in range
-                    is_in_range, distance_to_person = is_person_centered_and_in_range(
-                        pose_result.pose_landmarks, depth_frame, frame_width, frame_height
-                    )
+            try:
+                while True:
+                    inRgb = q.get()  # Get RGB frame from OAK-D S2
                     
-                    # ONLY count as detected if within distance range
-                    if is_in_range:
+                    if inRgb is not None:
+                        # Convert to OpenCV format
+                        img = inRgb.getCvFrame()
+                        
+                        # Flip horizontally (mirror effect)
+                        img = cv2.flip(img, 1)
+                        debug_img = img.copy()
+                        
+                        # Convert BGR to RGB for MediaPipe
+                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        img_rgb.flags.writeable = False
+                        
+                        frame_height, frame_width = img.shape[:2]
+                        
+                        hand_result = hands.process(img_rgb)
+                        pose_result = pose.process(img_rgb)
+                        
+                        img_rgb.flags.writeable = True
+                        
+                        person_count = 0
                         current_time = time.time()
                         
-                        if person_count == 0:
+                        # SIMPLIFIED PERSON DETECTION - NO DISTANCE CONDITIONS
+                        if pose_result.pose_landmarks:
+                            if detect_person(pose_result.pose_landmarks):
+                                if person_count == 0:
+                                    with data_lock:
+                                        if current_data["person_detected_time"] == 0:
+                                            current_data["person_detected_time"] = current_time
+                                
+                                person_count = 1
+                                
+                                with data_lock:
+                                    time_detected = current_time - current_data["person_detected_time"]
+                                    person_stable = time_detected >= PERSON_STABLE_THRESHOLD
+                                    current_data["person_stable"] = person_stable
+                                    # Always trigger detection when person is stable (no distance conditions)
+                                    if person_stable:
+                                        current_data["detection_triggered"] = True
+                                    else:
+                                        current_data["detection_triggered"] = False
+                        else:
                             with data_lock:
-                                if current_data["person_detected_time"] == 0:
-                                    current_data["person_detected_time"] = current_time
+                                current_data["person_detected_time"] = 0
+                                current_data["person_stable"] = False
+                                current_data["detection_triggered"] = False
+
+                        # GESTURE DETECTION WITH 1.5 SECOND STABILITY REQUIREMENT
+                        detected_gesture = "unknown"
+                        gesture_confidence = 0.0
                         
-                        person_count = 1
+                        if hand_result.multi_hand_landmarks:
+                            for hand_landmarks in hand_result.multi_hand_landmarks:
+                                landmark_list = calc_landmark_list(img, hand_landmarks)
+                                pre_processed_landmark_list = pre_process_landmark(landmark_list)
+                                hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
+                                
+                                if hand_sign_id < len(keypoint_classifier_labels):
+                                    detected_gesture = keypoint_classifier_labels[hand_sign_id]
+                                    gesture_confidence = 1.0  # You can implement actual confidence if available
+                                    logger.debug(f"OAK-D S2 Detected gesture: {detected_gesture}")
+                                
+                                break  # Only process first hand
                         
+                        # UPDATE GESTURE STABILITY WITH 1.5 SECOND REQUIREMENT
                         with data_lock:
-                            time_detected = current_time - current_data["person_detected_time"]
-                            person_stable = time_detected >= PERSON_STABLE_THRESHOLD
-                            current_data["person_stable"] = person_stable
-                            current_data["distance_to_person"] = distance_to_person
-                            
-                            if (current_data["person_stable"] and 
-                                current_time - current_data["last_trigger_time"] > COOLDOWN_TIME):
-                                detection_triggered = True
-                                current_data["detection_triggered"] = True
-                                current_data["last_trigger_time"] = current_time
-                                logger.info(f"Person detected and stable at {distance_to_person:.2f}m")
-                    else:
-                        # Person visible but outside range - reset detection
-                        with data_lock:
-                            current_data["person_detected_time"] = 0
-                            current_data["person_stable"] = False
-                            current_data["distance_to_person"] = distance_to_person
-            else:
-                # No person detected OR person outside range
-                with data_lock:
-                    current_data["person_detected_time"] = 0
-                    current_data["person_stable"] = False
-                    current_data["distance_to_person"] = 0.0
-            
-            # Gesture recognition
-            real_time_gesture = "unknown"
-            gesture_stability = False
-            
-            if hand_result.multi_hand_landmarks:
-                for hand_landmarks in hand_result.multi_hand_landmarks:
-                    landmark_list = calc_landmark_list(img, hand_landmarks)
-                    pre_processed_landmark_list = pre_process_landmark(landmark_list)
-                    
-                    hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-                    real_time_gesture = keypoint_classifier_labels[hand_sign_id]
-                    
-                    finger_gesture_history.append(hand_sign_id)
-                    most_common_fg = Counter(finger_gesture_history).most_common()
-                    
-                    if most_common_fg:
-                        stable_gesture = keypoint_classifier_labels[most_common_fg[0][0]]
-                        gesture_stability = most_common_fg[0][1] >= (history_length * 0.7)
-                        
-                        current_time = time.time()
-                        
-                        if stable_gesture != current_data["last_detected_gesture"]:
-                            with data_lock:
+                            if detected_gesture != current_data["last_detected_gesture"]:
+                                current_data["last_detected_gesture"] = detected_gesture
                                 current_data["gesture_detected_time"] = current_time
-                                current_data["last_detected_gesture"] = stable_gesture
+                                current_data["gesture_stable"] = False
+                                current_data["confidence"] = gesture_confidence
+                                logger.debug(f"OAK-D S2 Gesture changed to: {detected_gesture}, starting stability timer")
+                            else:
+                                time_stable = current_time - current_data["gesture_detected_time"]
+                                if time_stable >= GESTURE_STABLE_THRESHOLD and detected_gesture != "unknown":
+                                    if not current_data["gesture_stable"]:
+                                        logger.info(f"OAK-D S2 Gesture '{detected_gesture}' stable for {GESTURE_STABLE_THRESHOLD}s - sending to websocket")
+                                    current_data["gesture_stable"] = True
+                                else:
+                                    current_data["gesture_stable"] = False
+                                current_data["confidence"] = gesture_confidence
                         
+                        # ONLY SEND STABLE GESTURES TO WEBSOCKET (1.5 SECOND REQUIREMENT)
+                        stable_gesture = "unknown"
                         with data_lock:
-                            time_stable = current_time - current_data["gesture_detected_time"]
-                            current_data["gesture_stable"] = (
-                                gesture_stability and 
-                                time_stable >= GESTURE_STABLE_THRESHOLD
-                            )
+                            # Only send gestures that have been stable for 1.5 seconds
+                            if current_data["gesture_stable"] and current_data["last_detected_gesture"] != "unknown":
+                                stable_gesture = current_data["last_detected_gesture"]
+                        
+                        # UPDATE WEBSOCKET DATA
+                        with data_lock:
+                            current_data.update({
+                                "person_count": person_count,
+                                "gesture": stable_gesture,  # Only stable gestures are sent to websocket
+                                "timestamp": current_time,
+                                "status": "running"
+                            })
                             
-                            if current_data["gesture_stable"]:
-                                current_data["gesture"] = stable_gesture
-                                logger.info(f"Stable gesture detected: {stable_gesture}")
-            else:
+                            # Log for debugging when stable gestures are sent
+                            if stable_gesture != "unknown":
+                                logger.info(f"OAK-D S2 WebSocket sending: person_count={person_count}, person_stable={current_data['person_stable']}, gesture={stable_gesture}")
+                        
+                        # VIDEO DISPLAY WITH ENHANCED FEEDBACK
+                        if show_video:
+                            display_img = debug_img.copy()
+                            
+                            with data_lock:
+                                real_time_gesture = current_data["last_detected_gesture"]
+                                is_stable = current_data["gesture_stable"]
+                                person_stable_status = current_data["person_stable"]
+                                time_detecting = current_time - current_data["gesture_detected_time"]
+                                websocket_gesture = current_data["gesture"]
+                                
+                                if real_time_gesture != "unknown":
+                                    stability_text = f"STABLE ({time_detecting:.1f}s)" if is_stable else f"DETECTING... ({time_detecting:.1f}s/{GESTURE_STABLE_THRESHOLD}s)"
+                                    stability_color = (0, 255, 0) if is_stable else (0, 255, 255)
+                                else:
+                                    stability_text = "NO HAND"
+                                    stability_color = (128, 128, 128)
+                            
+                            cv2.putText(display_img, f"OAK-D S2 Gesture: {real_time_gesture}", (10, 50), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+                            cv2.putText(display_img, stability_text, (10, 90), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, stability_color, 2)
+                            cv2.putText(display_img, f"Person Stable: {person_stable_status}", (10, 130), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                            cv2.putText(display_img, f"Person Count: {person_count}", (10, 170), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                            # Show what gets sent to websocket
+                            cv2.putText(display_img, f"WebSocket: {websocket_gesture}", (10, 210), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                            
+                            if hand_result.multi_hand_landmarks:
+                                for hand_landmarks in hand_result.multi_hand_landmarks:
+                                    mp_draw.draw_landmarks(
+                                        display_img, hand_landmarks, mp_hands.HAND_CONNECTIONS,
+                                        mp_draw.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
+                                        mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2)
+                                    )
+                            
+                            if pose_result.pose_landmarks:
+                                mp_draw.draw_landmarks(
+                                    display_img, pose_result.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                                    mp_draw.DrawingSpec(color=(245, 117, 66), thickness=2, circle_radius=2),
+                                    mp_draw.DrawingSpec(color=(245, 66, 230), thickness=2)
+                                )
+                            
+                            cv2.imshow("OAK-D S2 Person & Gesture Detection", display_img)
+                        
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord('q'):
+                            break
+                        elif key == ord('s'):
+                            show_video = not show_video
+                            if not show_video:
+                                cv2.destroyAllWindows()
+            
+            except KeyboardInterrupt:
+                logger.info("Interrupted by user")
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+            finally:
                 with data_lock:
-                    current_data["gesture_detected_time"] = 0
-                    current_data["gesture_stable"] = False
-                    current_data["last_detected_gesture"] = "unknown"
-            
-            # Update global data
-            with data_lock:
-                current_data["person_count"] = person_count
-                current_data["timestamp"] = time.time()
-                current_data["status"] = "running"
-            
-            # Display video if enabled
-            if show_video:
-                display_img = debug_img.copy()
+                    current_data["status"] = "stopped"
                 
-                # Display depth info if available
-                if depth_frame is not None:
-                    cv2.putText(display_img, f"Distance: {distance_to_person:.2f}m", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                cv2.destroyAllWindows()
+                hands.close()
+                pose.close()
+                logger.info("Cleanup completed")
                 
-                # Display person detection status
-                person_status = f"Person: {person_count}"
-                if current_data["person_stable"]:
-                    person_status += " (STABLE)"
-                    person_color = (0, 255, 0)
-                else:
-                    person_status += " (DETECTING...)"
-                    person_color = (0, 255, 255)
-                
-                cv2.putText(display_img, person_status, (10, 60), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, person_color, 2)
-                
-                # Display gesture info
-                is_stable = current_data["gesture_stable"]
-                stability_text = "STABLE" if is_stable else "DETECTING..."
-                stability_color = (0, 255, 0) if is_stable else (0, 255, 255)
-                
-                cv2.putText(display_img, f"Gesture: {real_time_gesture}", (10, 90), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(display_img, stability_text, (10, 120), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, stability_color, 2)
-                
-                # Draw landmarks
-                if hand_result.multi_hand_landmarks:
-                    for hand_landmarks in hand_result.multi_hand_landmarks:
-                        mp_draw.draw_landmarks(
-                            display_img, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-                            mp_draw.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
-                            mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2)
-                        )
-                
-                if pose_result.pose_landmarks:
-                    mp_draw.draw_landmarks(
-                        display_img, pose_result.pose_landmarks, mp_pose.POSE_CONNECTIONS,
-                        mp_draw.DrawingSpec(color=(245, 117, 66), thickness=2, circle_radius=2),
-                        mp_draw.DrawingSpec(color=(245, 66, 230), thickness=2)
-                    )
-                
-                cv2.imshow("Oak D S2 - Person & Gesture Detection", display_img)
-                
-                # Show depth visualization (optional)
-                if depth_frame is not None:
-                    # Normalize depth for display
-                    depth_colormap = cv2.applyColorMap(
-                        cv2.convertScaleAbs(depth_frame, alpha=0.03), cv2.COLORMAP_JET
-                    )
-                    cv2.imshow("Depth View", depth_colormap)
-            
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            elif key == ord('s'):
-                show_video = not show_video
-                if not show_video:
-                    cv2.destroyAllWindows()
-            elif key == ord('d'):
-                # Toggle depth view
-                pass
-    
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
     except Exception as e:
-        logger.error(f"Error in main loop: {e}")
-    finally:
-        with data_lock:
-            current_data["status"] = "stopped"
-        
-        device.close()
-        cv2.destroyAllWindows()
-        hands.close()
-        pose.close()
-        logger.info("Oak D S2 cleanup completed")
+        logger.error(f"Failed to connect to OAK-D S2: {e}")
+        logger.error("Make sure:")
+        logger.error("1. OAK-D S2 is connected via USB")
+        logger.error("2. DepthAI library is installed: pip install depthai")
+        logger.error("3. No other applications are using the camera")
 
 if __name__ == "__main__":
     try:
-        import depthai as dai
         import websockets
-        import copy
-        import itertools
+        import depthai as dai
         main()
     except ImportError as e:
-        logger.error(f"Required library not installed: {e}")
-        logger.info("Install with: pip install depthai websockets")
+        if "depthai" in str(e):
+            logger.error("DepthAI library not installed. Install with: pip install depthai")
+        elif "websockets" in str(e):
+            logger.error("websockets library not installed. Install with: pip install websockets")
+        else:
+            logger.error(f"Import error: {e}")
         exit(1)
     except Exception as e:
         logger.error(f"Fatal error: {e}")

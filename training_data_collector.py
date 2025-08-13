@@ -23,7 +23,9 @@ GESTURE_NAMES = {
     4: "❤️ Heart",
     5: "👊 Fist Bump",
     6: "🔲 Cuadro",
-    7: "👋 Waving"
+    7: "👋 Waving",
+    8: "💖 K Heart",
+    9: "🛑 Stoppie"
 }
 
 def calc_landmark_list(image, landmarks):
@@ -60,7 +62,7 @@ def pre_process_landmark(landmark_list):
     return temp_landmark_list
 
 def logging_csv(number, landmark_list):
-    if 0 <= number <= 7:
+    if 0 <= number <= 9:
         csv_path = 'model/keypoint_classifier/keypoint.csv'
         
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -71,7 +73,7 @@ def logging_csv(number, landmark_list):
 
 def count_samples():
     csv_path = 'model/keypoint_classifier/keypoint.csv'
-    counts = {i: 0 for i in range(8)}
+    counts = {i: 0 for i in range(10)}
     
     try:
         with open(csv_path, 'r') as f:
@@ -79,7 +81,7 @@ def count_samples():
             for row in reader:
                 if row and row[0].isdigit():
                     gesture_id = int(row[0])
-                    if 0 <= gesture_id <= 7:
+                    if 0 <= gesture_id <= 9:  # FIXED: Changed from <= 7 to <= 9
                         counts[gesture_id] += 1
     except FileNotFoundError:
         pass
@@ -98,7 +100,7 @@ def main():
     print("=== GESTURE TRAINING DATA COLLECTOR ===")
     print("Instructions:")
     print("1. Press 'k' to enter data collection mode")
-    print("2. Press 0-7 to collect data for gestures:")
+    print("2. Press 0-9 to collect data for gestures:")  # FIXED: Changed from 0-7 to 0-9
     for i, name in GESTURE_NAMES.items():
         print(f"   {i}: {name}")
     print("3. Hold gesture steady and press number repeatedly")
@@ -116,7 +118,7 @@ def main():
             print(f"Mode changed to: {'Data Collection' if mode == 1 else 'Normal'}")
         
         number = -1
-        if 48 <= key <= 55:
+        if 48 <= key <= 57:  # FIXED: Changed from <= 55 to <= 57 to handle keys 0-9
             number = key - 48
             current_gesture = number
             if mode == 1:
@@ -166,13 +168,13 @@ def main():
         cv2.putText(debug_image, "Sample Counts:", (10, y_offset), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        for i in range(8):
+        for i in range(10):  # FIXED: Changed from range(8) to range(10)
             color = (0, 255, 0) if sample_counts[i] >= 200 else (0, 255, 255) if sample_counts[i] >= 100 else (255, 255, 255)
             cv2.putText(debug_image, f"{i}: {sample_counts[i]} samples", 
                        (10, y_offset + 25 + i * 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         
         if mode == 1:
-            cv2.putText(debug_image, "Hold gesture steady and press 0-7", (10, h - 60), 
+            cv2.putText(debug_image, "Hold gesture steady and press 0-9", (10, h - 60),  # FIXED: Changed from 0-7 to 0-9
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
             cv2.putText(debug_image, "Aim for 200+ samples per gesture", (10, h - 40), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
@@ -190,7 +192,7 @@ def main():
     
     final_counts = count_samples()
     print("\n=== FINAL SUMMARY ===")
-    for i in range(8):
+    for i in range(10):  # FIXED: Changed from range(8) to range(10)
         status = "✅ Ready" if final_counts[i] >= 200 else "⚠️ Need more" if final_counts[i] >= 100 else "❌ Too few"
         print(f"{GESTURE_NAMES[i]}: {final_counts[i]} samples {status}")
     print("=" * 50)
